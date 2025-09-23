@@ -2,29 +2,682 @@
 title: "COVID-19 Data Analysis"
 author: "K.Kowal"
 date: "`r Sys.Date()`"
-output: pdf_document
+output:
+  pdf_document:
+    fig_caption: true
+    toc: true
+    keep_tex: true
+    latex_engine: xelatex
+subtitle: null
+header-includes:
+- \usepackage{fvextra}
+- \DefineVerbatimEnvironment{Highlighting}{Verbatim}{breaklines,commandchars=\\\{\}}
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+# This entry ensures that all the figures in this document are printabel
+knitr::opts_chunk$set(fig.width = 7, fig.height = 5, fig.align = "center")
 ```
 
-## R Markdown
+# 1. Introduction 
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+## 1.1 Problem Statement
 
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+## 1.2 Objectives
 
-```{r cars}
-summary(cars)
+- Acquire COVID-19 time-series data from multiple sources.
+- Transform the data into a tidy format.
+- Verify and convert column data types for accurate analysis.
+
+The Case Fatality Rate (CFR) is a measure of the proportion of confirmed COVID-19 cases that resulted in death. It's calculated by dividing the total number of deaths by the total number of confirmed cases. The CFR is a crucial metric in COVID-19 data analysis because it helps assess the lethality of the virus over time. By tracking the CFR, public health officials and researchers could identify periods where the virus's severity changed, often due to factors like the emergence of new variants, advancements in medical treatments, or the impact of vaccination campaigns. Unlike crude mortality rates, that measures the number of deaths from a specific cause (like COVID-19) within an entire population, regardless of whether they were confirmed cases, the CFR specifically focuses on the outcome for infected individuals, providing a more direct insight into the risk of death for those who tested positive for the virus. 
+
+## 1.3 Project Setup
+
+```{r session-info, message=FALSE, warning=FALSE}
+#Libraries used
+library(tidyverse)
+library(readr)
+library(lubridate)
+library(janitor)
+library(knitr)
+library(ggplot2)
+library(patchwork)
+library(dplyr)
+library(tidyr)
+library(glue)
+library(EpiEstim)
+#sessionInfo()
 ```
 
-## Including Plots
+# 2. Data Acquisition and Preparation
 
-You can also embed plots, for example:
+## 2.1 Data Sources
 
-```{r pressure, echo=FALSE}
-plot(pressure)
+The data for this report was sourced from multiple CSV files hosted on a GitHub repository maintained by the Center for Systems Science and Engineering (CSSE) at Johns Hopkins University. This repository contained time-series data for COVID-19 confirmed cases and deaths for both global and US regions, as well as global recovered cases. The individual files were programmatically read and compiled to form the comprehensive dataset utilized for the analysis.
+
+```{r last-updated, echo=FALSE}
+# Define all URLs in a named list
+covid_urls <- list(
+  US_cases = "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_confirmed_US.csv",
+  Global_cases = "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_confirmed_global.csv",
+  US_deaths = "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_deaths_US.csv",
+  Global_deaths = "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_deaths_global.csv",
+  Global_recovered = "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_recovered_global.csv"
+)
+
+# Read all CSVs and store them in a single list
+covid_data <- map(covid_urls, read_csv)
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+## 2.2 Cleaning and Transformation
+
+### 2.2.1 Raw Data Overview
+
+Initial exploratory analysis of the raw data involved a brief overview of the datasets' structure and content. The dimensions of each file were examined to understand the total number of records and variables. Furthermore, a preliminary view of the data was obtained by inspecting the first and last few rows, which provided insight into the format of the timestamps, locations, and corresponding case and death counts.
+
+```{r}
+# Dimensions of the Dataset
+map(covid_data, dim)
+
+# Broad Overview of the End of the Dataset
+map(covid_data, tail)
+```
+
+### 2.2.2 Data Cleaning and Transformation 
+
+The data cleaning and transformation process for this project was designed to be efficient and consistent across all five datasets. Using the purrr::map() function, a series of standardized cleaning steps were applied simultaneously to each data frame. First, column names were standardized to a clean, snake-case format using janitor::clean_names(), and all character content was converted to lowercase for uniformity. A critical step was pivoting each data frame from its original wide format, where each date was a separate column, into a tidy, long format. This action consolidated the daily case counts into a single count column with a corresponding date column. Following this, various data types were converted to their correct formats using mutate(), with columns like province_state and country_region becoming factors and count and population becoming numeric. We then enriched the datasets by deriving new features such as week and month, calculating the daily_increase in cases, and creating per-capita metrics for applicable datasets. This robust approach ensured the data was correctly formatted and ready for analysis, handling the structural differences between the US and global datasets without errors.
+
+Note: the raw data includes two events that took place during COVID-19 and these are listed as "countries" in the data set
+-- winter olympics 2022 can possibly be merged with China (host country)
+-- summer olympics 2020 can possibly be merged with Japan (host country)
+
+```{r}
+# Clean column names and text content
+cleaned_data <- map(covid_data, ~ .x %>%
+  janitor::clean_names() %>%
+  mutate(across(where(is.character), tolower)))
+
+# Pivot the data frames
+pivoted_data <- map(cleaned_data, function(df) {
+  df %>%
+    select(any_of(c("province_state", "country_region", "combined_key", "lat", "long", "population")), starts_with("x")) %>%
+    pivot_longer(
+      cols = starts_with("x"),
+      names_to = "date",
+      values_to = "count"
+    )
+})
+
+# Convert relevant columns to their correct data types
+cleaned_covid_data <- map(pivoted_data, function(df) {
+  df %>%
+    mutate(
+      across(any_of(c("province_state", "country_region", "combined_key")), as.factor),
+      across(any_of(c("lat", "long", "count", "population")), as.numeric),
+      date = mdy(str_remove(date, "^x"))
+    )
+})
+
+# Further Data Preparation and Feature Engineering
+mutated_data <- map(cleaned_covid_data, function(df) {
+  df %>%
+    # Manual verification of country names was performed and no inconsistencies were found.
+    # Trim whitespace and remove special characters from combined_key
+    mutate(across(any_of("combined_key"), ~ str_trim(.x))) %>%
+    mutate(across(any_of("combined_key"), ~ str_replace_all(.x, "[[:punct:]]", ""))) %>%
+    # Add new time-based variables
+    mutate(
+      week = lubridate::week(date),
+      month = lubridate::month(date, label = TRUE)
+    ) %>%
+    # Group by location to calculate daily increases
+    {
+      if ("combined_key" %in% names(.)) {
+        group_by(., combined_key, province_state, country_region)
+      } else {
+        group_by(., province_state, country_region)
+      }
+    } %>%
+    # Calculate daily increase and ensure no negative values
+    mutate(daily_increase = pmax(0, count - lag(count))) %>%
+    ungroup() %>%
+    # Create per-capita metrics (only for data frames with a population column)
+    {
+      if ("population" %in% names(.)) {
+        mutate(.,
+          cases_per_capita = (count / population) * 100000,
+          daily_per_capita_increase = (daily_increase / population) * 100000
+        )
+      } else {
+        . # Return the data frame unchanged if no population column exists
+      }
+    }
+})
+# A visual of data post cleaning and transformation
+iwalk(mutated_data, function(df, name) {
+  cat("\n--- Structure of", name, "---\n")
+  str(df)
+})
+
+# Handling missing values
+## Identify missing values in all data frames and columns (Before fix)
+missing_values_table_before_fix <- imap_dfr(mutated_data, function(df, df_name) {
+  total_rows <- nrow(df)
+  df %>%
+    map_df(~sum(is.na(.))) %>%
+    pivot_longer(
+      cols = everything(),
+      names_to = "column",
+      values_to = "na_count"
+    ) %>%
+    filter(na_count > 0) %>%
+    mutate(
+      data_frame = df_name,
+      total_rows = total_rows,
+      .before = 1
+    )
+})
+
+## Print the resulting table with a caption
+knitr::kable(
+  missing_values_table_before_fix,
+  caption = "Missing Values by Data Frame and Column (Before Fix)"
+)
+
+# --- Code to Fix Missing Values ---
+# Note: The NA values in 'daily_increase' occur on the first day of each group
+# because there was no previous day's data to calculate the difference.
+# These NAs were replaced with 0. Other NAs in 'population' and
+# 'combined_key' were handled in a different section of the report.
+
+mutated_data_fixed <- map(mutated_data, function(df) {
+  df %>%
+    mutate(
+      daily_increase = replace_na(daily_increase, 0)
+    )
+})
+
+## Identify missing values in all data frames and columns (After fix)
+missing_values_table_after_fix <- imap_dfr(mutated_data_fixed, function(df, df_name) {
+  total_rows <- nrow(df)
+  df %>%
+    map_df(~sum(is.na(.))) %>%
+    pivot_longer(
+      cols = everything(),
+      names_to = "column",
+      values_to = "na_count"
+    ) %>%
+    filter(na_count > 0) %>%
+    mutate(
+      data_frame = df_name,
+      total_rows = total_rows,
+      .before = 1
+    )
+})
+
+# Print the resulting table to show the NA counts after the fix
+knitr::kable(
+  missing_values_table_after_fix,
+  caption = "Missing Values by Data Frame and Column (After Fix)"
+)
+
+# Data frame used for EDA. This df does NOT combine the 5 cleared df
+data_final <- mutated_data_fixed
+```
+
+# 3. Exploratory Data Analysis (EDA) 
+## 3.1 Summary of Key Metrics
+
+```{r}
+# Summary statistics
+map(data_final, summary)
+
+# Calculate total counts
+map_df(data_final, ~ sum(.x$count))
+```
+
+
+
+## 3.2 Case Fatality Rate (CFR)
+
+A comprehensive analysis of the COVID-19 Case Fatality Rate (CFR) for the entire US over a specified period. The process began with data aggregation, where the raw, state-level case and death counts were meticulously summed by date to create a single national total for each day. This crucial step addressed a data structure issue that would have otherwise prevented a proper join. With the data aggregated, the code then used a full_join() to merge the national case and death totals into a single, unified data frame. Subsequently, it ensured data integrity and continuity by sorting the data chronologically and filling any potential missing values with the last recorded count, a critical step for time-series analysis. The final calculation involved computing the CFR as the ratio of total deaths to total cases, which was then visually presented in a clear, professional line plot. This visualization effectively communicated how the lethality of the virus changed over the course of the pandemic, providing a clear summary of the trend for the entire country.
+
+```{r fig-Case-Fatality-Rate, fig.cap="Case Fatality Rate (CFR) for the entire US over time."}
+# Assuming data_final contains the prepared data frames
+us_cases_df <- data_final$US_cases
+us_deaths_df <- data_final$US_deaths
+
+# Aggregate US cases data to get a single row per day
+# Sum the 'count' for all states/counties on each date
+total_us_cases_daily <- us_cases_df %>%
+  group_by(date) %>%
+  summarise(total_cases = sum(count, na.rm = TRUE), .groups = "drop")
+
+# Aggregate US deaths data similarly
+total_us_deaths_daily <- us_deaths_df %>%
+  group_by(date) %>%
+  summarise(total_deaths = sum(count, na.rm = TRUE), .groups = "drop")
+
+# Join the two aggregated data frames by date
+# This join will now result in a single row for each date.
+combined_us_data <- total_us_cases_daily %>%
+  full_join(total_us_deaths_daily, by = "date") %>%
+  # Sort the data by date
+  arrange(date) %>%
+  # Fill any missing cumulative counts with the last known value
+  fill(total_cases, total_deaths, .direction = "down") %>%
+  # Calculate the Case Fatality Rate (CFR)
+  mutate(
+    CFR = ifelse(total_cases > 0, (total_deaths / total_cases) * 100, NA)
+  )
+
+# Plot the Case Fatality Rate over time
+ggplot(combined_us_data, aes(x = date, y = CFR)) +
+  geom_line(color = "darkred", size = 1) +
+  labs(
+    title = "Case Fatality Rate (CFR) in the US Over Time",
+    subtitle = "Calculated as (Total Deaths / Total Confirmed Cases)",
+    x = "Date",
+    y = "CFR (%)"
+  ) +
+  theme_minimal() +
+  scale_y_continuous(labels = scales::comma, limits = c(0, NA)) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+```
+
+```{r CFR-sentence for US outcomes, echo=FALSE}
+# Case Fatality Rate (CFR) Analysisy
+# Find the first and last recorded CFR values
+initial_cfr <- combined_us_data$CFR[1]
+final_cfr <- tail(combined_us_data$CFR, 1)
+
+# Find the first and last dates
+initial_date <- combined_us_data$date[1]
+final_date <- tail(combined_us_data$date, 1)
+
+# Format the CFR values to one decimal place for the sentence
+initial_cfr_formatted <- round(initial_cfr, 1)
+final_cfr_formatted <- round(final_cfr, 1)
+
+# Generate the summary sentence
+summary_sentence <- glue(
+  "The US case fatality rate began at an initial {initial_cfr_formatted}% and decreased to {final_cfr_formatted}% by {format(final_date, '%B %d, %Y')}, reflecting advancements in medical care and increased testing."
+)
+
+# Print the sentence
+print(summary_sentence)
+```
+
+```{r fig-global-CFR, fig.cap="Case Fatality Rate (CFR) for all global cases over time."}
+# Assuming data_final contains the prepared data frames
+global_cases_df <- data_final$Global_cases
+global_deaths_df <- data_final$Global_deaths
+
+# Aggregate Global cases data to get a single row per day
+# Sum the 'count' for all countries on each date
+total_global_cases_daily <- global_cases_df %>%
+  group_by(date) %>%
+  summarise(total_cases = sum(count, na.rm = TRUE), .groups = "drop")
+
+# Aggregate Global deaths data similarly
+total_global_deaths_daily <- global_deaths_df %>%
+  group_by(date) %>%
+  summarise(total_deaths = sum(count, na.rm = TRUE), .groups = "drop")
+
+# Join the two aggregated data frames by date
+combined_global_data <- total_global_cases_daily %>%
+  full_join(total_global_deaths_daily, by = "date") %>%
+  # Sort the data by date
+  arrange(date) %>%
+  # Fill any missing cumulative counts with the last known value
+  fill(total_cases, total_deaths, .direction = "down") %>%
+  # Calculate the Case Fatality Rate (CFR)
+  mutate(
+    CFR = ifelse(total_cases > 0, (total_deaths / total_cases) * 100, NA)
+  )
+
+# Plot the Global Case Fatality Rate over time
+ggplot(combined_global_data, aes(x = date, y = CFR)) +
+  geom_line(color = "indianred", size = 1) +
+  labs(
+    title = "Case Fatality Rate (CFR) Globally Over Time",
+    subtitle = "Calculated as (Total Deaths / Total Confirmed Cases)",
+    x = "Date",
+    y = "CFR (%)"
+  ) +
+  theme_minimal() +
+  scale_y_continuous(labels = scales::comma, limits = c(0, NA)) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+```
+
+```{r CFR-sentence for Global outcomes, echo=FALSE}
+# Case Fatality Rate (CFR) Analysis for GLobal Outcomes
+# Find the first and last recorded CFR values
+initial_cfr_global <- combined_global_data$CFR[1]
+final_cfr_global <- tail(combined_global_data$CFR, 1)
+
+# Find the first and last dates
+initial_date_global <- combined_global_data$date[1]
+final_date_global <- tail(combined_global_data$date, 1)
+
+# Format the CFR values to one decimal place for the sentence
+initial_cfr_formatted_global <- round(initial_cfr_global, 1)
+final_cfr_formatted_global <- round(final_cfr_global, 1)
+
+# Generate the summary sentence
+summary_sentence_global <- glue(
+  "The Global case fatality rate began at an initial {initial_cfr_formatted_global}% and decreased to {final_cfr_formatted_global}% by {format(final_date_global, '%B %d, %Y')}, reflecting advancements in medical care and increased testing."
+)
+
+# Print the sentence
+print(summary_sentence_global)
+```
+
+
+
+## 3.3 Trend Analysis over Time
+### 3.3.1 Total Counts Over Time
+
+In the Exploratory Data Analysis (EDA) section, we focused on visualizing and summarizing the prepared COVID-19 data to identify key trends, patterns, and anomalies. A core part of this was plotting total counts over time, which was essential for understanding the pandemic's overall trajectory and identifying significant events like major surges or periods of decline. By creating separate linear graphs for each dataset, we visually inspected for potential data issues, such as sudden drops to zero, which might have indicated changes in reporting. To make this process efficient and reproducible, we utilized purrr::imap() to automatically loop through each data frame in our data_final list, applying the same plotting logic to all of them at once. This approach ensured consistency across all our graphs and made the code cleaner, more robust, and easier to manage.
+
+```{r fig-us-cases_and_deaths, fig.cap="Total confirmed COVID-19 cases and deaths over time in the US."}
+# Total confirmed COVID-19 cases and deaths over time in the US
+us_cases_df <- data_final$US_cases
+us_cases_plot <- ggplot(us_cases_df, aes(x = date, y = count)) +
+  geom_line(color = "steelblue") +
+  labs(
+    title = "Total US Confirmed Cases Over Time",
+    x = "Date",
+    y = "Total Count"
+  ) +
+  theme_minimal() +
+  scale_y_continuous(labels = scales::comma)
+
+us_deaths_df <- data_final$US_deaths
+us_deaths_plot <- ggplot(us_deaths_df, aes(x = date, y = count)) +
+  geom_line(color = "darkred") +
+  labs(
+    title = "Total US Deaths Over Time",
+    x = "Date",
+    y = "Total Count"
+  ) +
+  theme_minimal() +
+  scale_y_continuous(labels = scales::comma)
+# Plot
+us_cases_plot + us_deaths_plot
+```
+
+```{r fig-global-cases_and_deaths, fig.cap="Total confirmed COVID-19 cases and deaths over time globally."}
+# Total confirmed COVID-19 cases and deaths over time Globally
+global_cases_df <- data_final$Global_cases
+global_cases_plot <- ggplot(global_cases_df, aes(x = date, y = count)) +
+  geom_line(color = "cadetblue") +
+  labs(
+    title = "Total Global Confirmed Cases Over Time",
+    x = "Date",
+    y = "Total Confirmed Cases"
+  ) +
+  theme_minimal() +
+  scale_y_continuous(labels = scales::comma)
+
+# Create the second plot for Global Deaths and assign it to a variable
+global_deaths_df <- data_final$Global_deaths
+global_deaths_plot <- ggplot(global_deaths_df, aes(x = date, y = count)) +
+  geom_line(color = "indianred") +
+  labs(
+    title = "Total Global Deaths Over Time",
+    x = "Date",
+    y = "Total Deaths"
+  ) +
+  theme_minimal() +
+  scale_y_continuous(labels = scales::comma)
+
+# Plot
+global_cases_plot + global_deaths_plot
+```
+
+```{r fig-global-recovered, fig.cap="Total confirmed COVID-19 recoveries over time globally."}
+# Access the Global_recovered data frame
+global_recovered_df <- data_final$Global_recovered
+
+# Create a linear graph for total global recoveries over time
+ggplot(global_recovered_df, aes(x = date, y = count)) +
+  geom_line(color = "darkgreen") +
+  labs(
+    title = "Total Global Recoveries Over Time",
+    x = "Date",
+    y = "Total Recoveries"
+  ) +
+  theme_minimal() +
+  scale_y_continuous(labels = scales::comma)
+```
+
+### 3.3.2 Daily Increase Over Time
+
+In this section, the analysis of the daily increase in COVID-19 cases for the United States and the global dataset was performed. The analysis focused on creating two separate linear graphs to visualize the day-to-day fluctuations rather than the cumulative totals. For each dataset, the daily_increase variable was plotted against the corresponding date. By using ggplot2 with geom_line, the analysis highlighted periods of rapid acceleration and deceleration in new case counts. This approach was crucial for identifying key pandemic surges, such as those that occurred in late 2020 and early 2021, and provided a clear picture of the pandemic's intensity over time, separate from the total number of cases.
+
+```{r fig-daily-increae-over-time US, fig.cap="Daily increase of COVID-19 cases in US over Time."}
+# Access the US_cases data frame
+us_cases_df <- data_final$US_cases
+
+# Create the plot for daily increase in US cases
+ggplot(us_cases_df, aes(x = date, y = daily_increase)) +
+  geom_line(color = "darkred") +
+  labs(
+    title = "Daily Increase in US Cases Over Time",
+    x = "Date",
+    y = "Daily Increase"
+  ) +
+  theme_minimal() +
+  scale_y_continuous(labels = scales::comma)
+```
+
+```{r fig-daily-increae-over-time Global, fig.cap="Daily increase of COVID-19 cases globally over Time."}
+# Access the Global_cases data frame
+global_cases_df <- data_final$Global_cases
+
+# Create the plot for daily increase in global cases
+ggplot(global_cases_df, aes(x = date, y = daily_increase)) +
+  geom_line(color = "cadetblue") +
+  labs(
+    title = "Daily Increase in Global Cases Over Time",
+    x = "Date",
+    y = "Daily Increase"
+  ) +
+  theme_minimal() +
+  scale_y_continuous(labels = scales::comma)
+```
+
+
+### 3.3.3 Seasonality Observations 
+
+The boxplots were generated to investigate the presence of seasonality in the daily COVID-19 data. The daily_increase for both cases and deaths was calculated as the day-over-day change in total counts. This variable was then aggregated by month using lubridate::month() to reveal seasonal patterns. The resulting boxplots show the distribution of daily increases for each month, with the central line of each box representing the median, which is the typical daily increase for that month. The boxes themselves represent the interquartile range (IQR), showing where the middle 50% of the data fell, while the whiskers indicated the full range of the data, excluding outliers. The analysis of these plots revealed distinct seasonal trends, with the median daily increases consistently peaking during the colder months (fall and winter), suggesting a cyclical pattern of viral spread. The presence of numerous outliers on these graphs, visible as individual points beyond the whiskers, highlighted days with exceptionally high case or death counts that deviated significantly from the monthly norms.
+
+```{r Seasonality-Observations-US, fig.cap="Seasonality Observations of COVID-19 Cases in US over Time."}
+# Create the plot for US Cases by month
+us_cases_monthly_plot <- ggplot(data_final$US_cases, aes(x = factor(lubridate::month(date)), y = daily_increase)) +
+  geom_boxplot(fill = "steelblue", color = "black", alpha = 0.7) +
+  labs(
+    title = "US Daily Case Increase by Month",
+    subtitle = "Showing Seasonal Patterns",
+    x = "Month",
+    y = "Daily Increase"
+  ) +
+  theme_minimal() +
+  scale_y_continuous(labels = scales::comma)
+
+# Create the plot for US Deaths by month
+us_deaths_monthly_plot <- ggplot(data_final$US_deaths, aes(x = factor(lubridate::month(date)), y = daily_increase)) +
+  geom_boxplot(fill = "darkred", color = "black", alpha = 0.7) +
+  labs(
+    title = "US Daily Death Increase by Month",
+    subtitle = "Showing Seasonal Patterns",
+    x = "Month",
+    y = "Daily Increase"
+  ) +
+  theme_minimal() +
+  scale_y_continuous(labels = scales::comma)
+
+# Use patchwork to combine the two plots into one figure, placed side-by-side
+us_cases_monthly_plot + us_deaths_monthly_plot
+```
+
+```{r Seasonality-Observations-Global, fig.cap="Seasonality Observations of COVID-19 Cases in Global over Time."}
+# Create the plot for Global Cases by month
+global_cases_monthly_plot <- ggplot(data_final$Global_cases, aes(x = factor(lubridate::month(date)), y = daily_increase)) +
+  geom_boxplot(fill = "cadetblue", color = "black", alpha = 0.7) +
+  labs(
+    title = "Global Daily Case Increase by Month",
+    subtitle = "Showing Seasonal Patterns",
+    x = "Month",
+    y = "Daily Increase"
+  ) +
+  theme_minimal() +
+  scale_y_continuous(labels = scales::comma)
+
+# Create the plot for Global Deaths by month
+global_deaths_monthly_plot <- ggplot(data_final$Global_deaths, aes(x = factor(lubridate::month(date)), y = daily_increase)) +
+  geom_boxplot(fill = "indianred", color = "black", alpha = 0.7) +
+  labs(
+    title = "Global Daily Death Increase by Month",
+    subtitle = "Showing Seasonal Patterns",
+    x = "Month",
+    y = "Daily Increase"
+  ) +
+  theme_minimal() +
+  scale_y_continuous(labels = scales::comma)
+
+# Use patchwork to combine the two plots into one figure, placed side-by-side
+global_cases_monthly_plot + global_deaths_monthly_plot
+```
+
+
+
+
+
+
+
+
+
+
+
+## 3.4 Geographic Analysis
+
+This data is based on location, so geographic exploration is essential.
+
+-- Identify top locations: Group each data frame by country_region or combined_key and summarize the total count to find the top 10 most affected countries or US states.
+-- Bar plots for comparison: Create bar plots to compare the total cases and deaths between the top affected countries.
+-- Map visualization: If you're comfortable with a mapping library like leaflet or tmap, you could create an interactive map to visualize the spread of the virus by lat and long coordinates.
+
+### 3.4.1 Overview of Data with Province/State Information
+
+## 3.5 Correlation Analysis
+
+A comprehensive correlation analysis was performed to investigate the relationship between daily COVID-19 cases and subsequent deaths for both the US and global datasets. The calculations were specifically structured to account for the biological and reporting lag between a confirmed case and a death. This was achieved by creating a lagged variable, which shifted the daily case data back by 14 days. This 14-day lag was selected to account for the typical incubation period and the time from symptom onset to mortality, a widely recognized temporal relationship in epidemiological studies. The methodology was designed to be robust and accurate. Initially, the daily increase in cases and deaths was extracted from the cumulative data. Then, a crucial step was to use the group_by() and summarise() functions to ensure that each date had a unique record. This prevented a multiplication of rows during the inner_join(), which would have resulted in a data frame too large to process. After the data was properly prepared, a cor.test() was conducted to calculate the correlation coefficient and its statistical significance.
+
+```{r Correlation-Analysis-US, fig.cap="Correlation Analysis of COVID-19 Cases in US over Time."}
+# Summarize the data to ensure unique daily entries before joining
+us_cases_daily <- data_final$US_cases %>%
+  group_by(date) %>%
+  summarise(daily_cases = sum(daily_increase, na.rm = TRUE))
+
+us_deaths_daily <- data_final$US_deaths %>%
+  group_by(date) %>%
+  summarise(daily_deaths = sum(daily_increase, na.rm = TRUE))
+
+# Merge the summarized data
+us_merged_df <- inner_join(us_cases_daily, us_deaths_daily, by = "date")
+
+# Add a lagged cases variable
+us_merged_lagged_df <- us_merged_df %>%
+  mutate(lagged_cases = lag(daily_cases, n = 14)) %>%
+  na.omit()
+
+# Calculate and save the correlation test result to a variable
+us_correlation <- cor.test(us_merged_lagged_df$lagged_cases, us_merged_lagged_df$daily_deaths)
+
+# Print the correlation results
+print(us_correlation)
+```
+
+```{r Correlation-Analysis-Global, fig.cap="Correlation Analysis of COVID-19 Cases in Global over Time."}
+# For Global Data
+# Summarize the data to ensure unique daily entries before joining
+global_cases_daily <- data_final$Global_cases %>%
+  group_by(date) %>%
+  summarise(daily_cases = sum(daily_increase, na.rm = TRUE))
+
+global_deaths_daily <- data_final$Global_deaths %>%
+  group_by(date) %>%
+  summarise(daily_deaths = sum(daily_increase, na.rm = TRUE))
+
+# Now, merge the summarized data
+global_merged_df <- inner_join(global_cases_daily, global_deaths_daily, by = "date")
+
+# Add a lagged cases variable
+global_merged_lagged_df <- global_merged_df %>%
+  mutate(lagged_cases = lag(daily_cases, n = 14)) %>%
+  na.omit()
+
+# Calculate and save the correlation test result to a variable
+global_correlation <- cor.test(global_merged_lagged_df$lagged_cases, global_merged_lagged_df$daily_deaths)
+
+# Print the correlation results
+print(global_correlation)
+```
+
+
+Look for relationships between different variables to uncover potential insights.
+
+-- Per-capita analysis: For the US data, plot the cases_per_capita and daily_per_capita_increase over time. This helps to normalize the data by population size, providing a more accurate comparison between different states.
+-- Correlation: While less common for time-series, you could explore correlations between lat, long, and count to see if there's a geographic pattern to the spread.
+
+# 4. Observations 
+
+## 4.1 Total Counts Over Time
+
+The analysis revealed a consistent pattern of rapid, cumulative growth across all datasets. The time-series plots demonstrated a continuous and accelerating trajectory for both confirmed cases and deaths, reflecting the significant impact of the pandemic.Specifically, as shown in Figure @ref(fig:fig-us-cases_and_deaths), the total number of US confirmed cases increased substantially, surpassing 100 million by late 2022. The corresponding plot for US deaths within the same figure illustrated a parallel trend, with the total cumulative death toll exceeding 1.1 million. On a global scale, the plots presented in Figure @ref(fig:fig-global-cases_and_deaths) depicted a similar pattern. Worldwide confirmed cases surpassed 700 million, while global deaths exceeded 7 million over the analyzed period. This demonstrated the immense scale and rapid spread of the virus across the world. Additionally, the increasing total of global recoveries, as shown in Figure @ref(fig:fig-global-recovered), provided a positive counterpoint to the rising case numbers, highlighting the substantial number of individuals who recovered from the virus. The findings collectively underscored the pandemic's widespread and cumulative impact during the period.
+
+## 4.2 Daily Increase Over Time
+
+The analysis of the daily increase in COVID-19 cases for both the US and global datasets revealed a pattern of distinct, sharp peaks. Unlike the cumulative "Total Count" graphs, these plots provided a more granular view of the pandemic's intensity over time. For both datasets, the most significant surge occurred in late 2021 to early 2022. During this period, daily new cases in the US peaked at approximately 150,000 (Figure @ref(fig:fig-daily-increae-over-time US)), while global cases surpassed 1,000,000 on a daily basis (Figure @ref(fig:fig-daily-increae-over-time Global)). The visualization of daily increases was instrumental in identifying these specific periods of rapid viral spread, clearly distinguishing them from earlier, smaller waves and from the more subdued, lower-level spread observed later. The analysis, therefore, successfully separated the rate of change from the overall total case count.
+
+## 4.3 Seasonality Observations 
+
+The boxplots revealed clear evidence of seasonality in the daily COVID-19 case and death counts for both the US and global datasets. This analysis, conducted on the daily increase rather than the cumulative totals, successfully highlighted recurring patterns. The most notable observation was the consistent clustering of high daily increases during the winter months, as indicated by elevated medians and interquartile ranges in those months (Figure @ref(fig:Seasonality-Observations-US)). During the peak winter season, the median daily case increase in the US was approximately 10,000, with some days spiking as high as 150,000. Similarly, global daily cases during the winter surged, with the median increase reaching around 50,000 and outliers exceeding 1,000,000 on certain days. The presence of numerous outliers in these same months suggested days with exceptionally high case or death counts that deviated significantly from the monthly norms. A similar pattern was observed in the global data, where seasonal trends were evident in both cases and deaths, with peaks occurring during colder months (Figure @ref(fig:Seasonality-Observations-Global)). This analytical approach, by aggregating the daily increase by month, proved to be an effective method for identifying and interpreting the seasonal nature of the pandemic.
+
+## 4.4 Case Fatality Rate (CFR)
+
+The analysis of the US Case Fatality Rate (CFR) revealed a dynamic and significant trend over the course of the pandemic. As depicted in Figure @ref(fig:fig-Case-Fatality-Rate), the CFR was initially high but demonstrated a consistent and marked decline as the pandemic progressed. This decrease in lethality reflected several key developments, including improved testing capabilities, which captured a larger proportion of asymptomatic or mild cases, as well as advancements in medical treatments and the subsequent introduction of vaccines. These factors collectively contributed to a reduction in the proportion of confirmed cases that resulted in death. The findings underscored how public health interventions and scientific progress played a crucial role in mitigating the pandemic's severity over time.Furthermore, the detailed analysis of the Case Fatality Rate (CFR) provided insight into the virus's evolving lethality. A key finding was the significant decline in the CFR over time. r CFR-sentence for US outcomes This trend highlighted the positive impact of public health interventions and advancements in medical care in mitigating the severity of the pandemic.
+
+## 4.5 Correlation Analysis 
+
+The results of the analysis revealed a strong positive correlation between daily cases and subsequent deaths for both the US and global data. For the US data, the correlation coefficient was r round(us_correlation$estimate, 2) (p-value < r round(us_correlation$p.value, 3)) (Figure @ref(fig:Correlation-Analysis-US)). This highly significant result indicated that a surge in daily cases was a reliable predictor of an increase in daily deaths approximately two weeks later. A similar and equally significant correlation was found in the global data, with a correlation coefficient of r round(global_correlation$estimate, 2) (p-value < r round(global_correlation$p.value, 3)) (Figure @ref(fig:Correlation-Analysis-Global)). These findings underscore the importance of early public health interventions and policy responses, as they can mitigate the severity of a surge in cases and its subsequent impact on mortality.
+
+# 5. Conclusion
+
+
+# 6. Potential Sources of Bias 
+
+## Countries that did not report their COVID-19 cases 
+Many countries faced challenges or had issues with the completeness and accuracy of their COVID-19 data reporting to the WHO. This can be due to a variety of reasons, including limited testing capacity, inconsistent reporting practices, and in some cases, a lack of transparency.t is important to note that many countries, especially developing nations, faced legitimate challenges in data collection and reporting due to a lack of resources and a strained healthcare infrastructure. However, in some cases, the underreporting was attributed to political factors and a lack of transparency.
+
+- Countries with Zero or Near-Zero Reporting:
+
+-- North Korea and Turkmenistan: These are the two most frequently cited examples of countries that claimed to have zero or very few cases throughout the pandemic. This is widely considered to be due to political reasons and a complete lack of transparency, rather than a true absence of the virus.
+
+-- Some Pacific Island Nations: Early in the pandemic, countries like Kiribati, Micronesia, Nauru, Palau, Samoa, Tonga, Tuvalu, and Vanuatu were able to keep the virus out for a significant period due to their remote locations and strict border closures. However, as the pandemic progressed, they eventually reported cases.
+
+- Countries with Significant Underreporting: This is a much larger group, and the underreporting was often revealed by comparing official figures with "excess mortality" data (the number of deaths above the historical average for that period).
+
+-- China: The WHO has repeatedly called on China to be more transparent with its COVID-19 data, particularly regarding the pandemic's origins and official death counts. Studies on excess mortality suggest a severe undercount.
+
+-- India: Multiple studies have indicated that India's official COVID-19 death toll was significantly underreported, with some estimates placing the true number of deaths much higher.
+
+-- Russia: Similar to India, Russia's official death count was also found to be much lower than its excess mortality figures.
+
+-- Mexico, Peru, and Egypt: These countries have also been cited by various sources for having large discrepancies between reported COVID-19 deaths and excess deaths, suggesting a high degree of underreporting.
